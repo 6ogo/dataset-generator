@@ -11,6 +11,9 @@ import seaborn as sns
 from sklearn.neighbors import KernelDensity
 from scipy.stats import gaussian_kde
 
+# Get today's date
+today = datetime.today().date()
+
 def detect_encoding(file_content):
     """Detect the encoding of a file"""
     result = chardet.detect(file_content)
@@ -464,10 +467,11 @@ if uploaded_file:
             # Date range selection
             st.subheader("Select Date Range")
             col1, col2 = st.columns(2)
+            
             with col1:
                 start_date = st.date_input("Start date", datetime(2024, 1, 1))
             with col2:
-                end_date = st.date_input("End date", datetime(2025, 12, 31))
+                end_date = st.date_input("End date", today)
             
             # Generate button
             if st.button("Generate Simulated Data"):
