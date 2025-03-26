@@ -1,4 +1,4 @@
-# Data Simulator
+# Data Generator and Simulator
 A Streamlit web application for generating realistic simulated data based on statistical analysis of existing datasets. Features automatic file format detection and robust error handling.
 Features
 Support for multiple file formats:
