@@ -30,6 +30,16 @@ source venv/bin/activate  # On Windows use: venv\Scripts\activate
 ```bash
 pip install -r requirements.txt
 ```
+```
+streamlit
+pandas
+numpy
+scipy
+chardet
+matplotlib
+seaborn
+scikit-learn
+```
 
 ## Usage
 1. Start the Streamlit app:
@@ -43,20 +53,9 @@ streamlit run dataGenerator.py
 6. Click "Generate Simulated Data" to create and visualize the new dataset
 7. Download the simulated data in CSV format
 
-## Requirements
-Create a `requirements.txt` file with the following dependencies:
-
-```
-streamlit
-pandas
-numpy
-scipy
-matplotlib
-```
-
 ## Input Data Format
 The application expects:
-- Excel files (.xlsx)
+- Excel files (.xlsx, .txt and .csv)
 - At least one numeric column for simulation
 - Optional date column for seasonality detection
 
