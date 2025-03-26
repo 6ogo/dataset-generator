@@ -2,4 +2,7 @@ streamlit
 pandas
 numpy
 scipy
+chardet
 matplotlib
+seaborn
+scikit-learn
