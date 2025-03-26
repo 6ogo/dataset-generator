@@ -1,14 +1,17 @@
 # Data Simulator
-A Streamlit web application for generating realistic simulated data based on statistical analysis of existing datasets.
+A Streamlit web application for generating realistic simulated data based on statistical analysis of existing datasets. Features automatic file format detection and robust error handling.
+Features
+Support for multiple file formats:
 
-## Features
-- Upload Excel files for analysis
-- Statistical distribution detection
-- Seasonality pattern preservation
-- Realistic noise generation
-- Interactive date range selection
-- Visual comparison between original and simulated data
-- Data export functionality
+.xlsx, .csv & .txt
+
+Statistical distribution detection
+Seasonality pattern preservation
+Realistic noise generation
+Interactive date range selection
+Visual comparison between original and simulated data
+Multiple export formats (CSV and Excel)
+Robust error handling and fallback options
 
 ## Installation
 1. Clone the repository:
@@ -31,7 +34,7 @@ pip install -r requirements.txt
 ## Usage
 1. Start the Streamlit app:
 ```bash
-streamlit run app.py
+streamlit run dataGenerator.py
 ```
 2. Open your web browser and navigate to the provided local URL (typically http://localhost:8501)
 3. Upload your Excel file containing the original dataset
