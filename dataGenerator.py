@@ -76,67 +76,51 @@ def load_data(uploaded_file):
         st.error(f"Error processing file: {str(e)}")
         return None
 
-def analyze_distribution_pattern(data, date_column=None):
-    """Analyze the detailed distribution pattern of the data"""
-    # Convert grouped data back to series if needed
-    if hasattr(data, 'obj'):  # If it's a GroupBy object
-        data = data.obj
-
+def analyze_distribution_pattern(data, column_name=None):
+    """Analyze the distribution pattern of the data, preserving skewness and tails."""
+    # Handle string/categorical data better
     if isinstance(data.iloc[0], (str, np.str_)):
-        # For string data, analyze patterns including date relationship
-        if date_column is not None and isinstance(data.index, pd.DatetimeIndex):
-            # Calculate frequency distribution per date
-            daily_counts = data.groupby(data.index.date).value_counts(normalize=True)
-            avg_daily_dist = daily_counts.groupby(level=-1).mean()
-            entries_per_day = data.groupby(data.index.date).size()
-            
-            return {
-                'type': 'categorical',
-                'distribution': avg_daily_dist.to_dict(),
-                'unique_values': list(avg_daily_dist.index),
-                'entries_per_day': {
-                    'mean': entries_per_day.mean(),
-                    'std': entries_per_day.std(),
-                    'min': entries_per_day.min(),
-                    'max': entries_per_day.max()
-                }
-            }
-        else:
-            # Standard frequency distribution if no date relationship
-            value_counts = data.value_counts(normalize=True)
-            return {
-                'type': 'categorical',
-                'distribution': value_counts.to_dict(),
-                'unique_values': list(value_counts.index),
-                'entries_per_day': None
-            }
+        value_counts = data.value_counts(normalize=True)
+        return {
+            'type': 'categorical',
+            'distribution': value_counts.to_dict(),
+            'unique_values': list(value_counts.index)
+        }
     else:
-        # For numeric data, analyze the distribution pattern
+        # For numeric data - preserve exact distribution better
         try:
-            # Remove outliers for better distribution fitting
-            q1 = data.quantile(0.01)
-            q3 = data.quantile(0.99)
-            iqr = q3 - q1
-            cleaned_data = data[(data >= q1 - 1.5 * iqr) & (data <= q3 + 1.5 * iqr)]
+            data_clean = data.dropna().values
             
-            # Fit KDE to get the probability density
-            kde = gaussian_kde(cleaned_data)
-            x_range = np.linspace(data.min(), data.max(), 1000)
+            # Use a more flexible bandwidth for KDE to better capture skewed distributions
+            if data_clean.std() > 0:
+                # Use Silverman's rule for bandwidth selection
+                bw = 0.9 * min(data_clean.std(), (np.percentile(data_clean, 75) - 
+                               np.percentile(data_clean, 25))/1.34) * len(data_clean)**(-0.2)
+                kde = gaussian_kde(data_clean, bw_method=bw)
+            else:
+                kde = gaussian_kde(data_clean)
+                
+            x_range = np.linspace(data_clean.min(), data_clean.max(), 1000)
             density = kde.evaluate(x_range)
+            is_discrete = all(data_clean.astype(int) == data_clean)
             
-            # Check if data is discrete
-            is_discrete = all(data.astype(int) == data)
+            # Calculate percentiles to better capture the distribution
+            percentiles = np.percentile(data_clean, [0, 10, 25, 50, 75, 90, 100])
             
-            # Calculate basic statistics
             stats_info = {
-                'mean': data.mean(),
-                'std': data.std(),
-                'min': data.min(),
-                'max': data.max(),
-                'skew': stats.skew(cleaned_data),
-                'kurtosis': stats.kurtosis(cleaned_data),
-                'is_discrete': is_discrete
+                'mean': data_clean.mean(),
+                'median': np.median(data_clean),
+                'std': data_clean.std(),
+                'min': data_clean.min(),
+                'max': data_clean.max(),
+                'skew': stats.skew(data_clean),
+                'kurtosis': stats.kurtosis(data_clean),
+                'is_discrete': is_discrete,
+                'percentiles': percentiles
             }
+            
+            # Remember histogram data for better simulation
+            hist, bin_edges = np.histogram(data_clean, bins='auto')
             
             return {
                 'type': 'numeric',
@@ -144,7 +128,11 @@ def analyze_distribution_pattern(data, date_column=None):
                 'x_range': x_range,
                 'density': density,
                 'stats': stats_info,
-                'original_data': data.values
+                'original_data': data_clean,
+                'histogram': {
+                    'counts': hist,
+                    'bins': bin_edges
+                }
             }
         except Exception as e:
             st.warning(f"Error in distribution analysis: {str(e)}")
@@ -152,19 +140,42 @@ def analyze_distribution_pattern(data, date_column=None):
 
 def generate_realistic_values(dist_pattern, n_samples):
     """Generate values that match the original distribution pattern"""
-    if dist_pattern['type'] == 'numeric':
+    if dist_pattern is None:
+        return np.zeros(n_samples)
+        
+    if dist_pattern['type'] == 'categorical':
+        # Improved categorical handling
+        values = list(dist_pattern['distribution'].keys())
+        probs = list(dist_pattern['distribution'].values())
+        probs_sum = sum(probs)
+        normalized_probs = [p / probs_sum for p in probs]
+        return np.random.choice(values, size=n_samples, p=normalized_probs)
+    elif dist_pattern['type'] == 'numeric':
         try:
             stats_info = dist_pattern['stats']
             
-            # Handle the case where all values are the same
+            # Handle special cases
             if stats_info['std'] == 0:
                 return np.full(n_samples, stats_info['mean'])
             
-            # Generate base samples using KDE
-            kde = dist_pattern['kde']
-            samples = kde.resample(n_samples)[0]
+            # For highly skewed distributions (use histogram sampling)
+            if abs(stats_info['skew']) > 1.0:
+                # Use histogram-based sampling for better preservation of skewed distributions
+                hist = dist_pattern['histogram']
+                bin_counts = hist['counts']
+                bin_edges = hist['bins']
+                bin_probs = bin_counts / bin_counts.sum()
+                
+                # Generate bin indices according to their probability
+                bin_indices = np.random.choice(len(bin_probs), size=n_samples, p=bin_probs)
+                
+                # Generate uniform samples within each selected bin
+                samples = np.array([np.random.uniform(bin_edges[i], bin_edges[i+1]) for i in bin_indices])
+            else:
+                # Use KDE for more normally distributed data
+                samples = dist_pattern['kde'].resample(n_samples)[0]
             
-            # Apply original constraints
+            # Apply constraints
             samples = np.clip(samples, stats_info['min'], stats_info['max'])
             
             # Handle NaN values
@@ -174,18 +185,15 @@ def generate_realistic_values(dist_pattern, n_samples):
             if stats_info['is_discrete']:
                 samples = np.round(samples).astype(int)
             
-            # Adjust the distribution moments to match original
-            samples = adjust_distribution_moments(samples, stats_info)
-            
             return samples
         except Exception as e:
-            st.warning(f"Error in value generation: {str(e)}")
-            # Fallback to uniform distribution between min and max
-            return np.random.uniform(
-                stats_info['min'],
-                stats_info['max'],
-                n_samples
-            )
+            # Fallback to simple sampling from the original data
+            if len(dist_pattern['original_data']) > 0:
+                return np.random.choice(dist_pattern['original_data'], size=n_samples)
+            else:
+                return np.zeros(n_samples)
+    else:
+        return np.zeros(n_samples)
 
 def adjust_distribution_moments(samples, target_stats):
     """Adjust the generated samples to match the original distribution moments"""
@@ -213,109 +221,200 @@ def adjust_distribution_moments(samples, target_stats):
     return adjusted
 
 def generate_simulated_data(existing_data, columns_config, start_date, end_date):
-    """Generate simulated data that matches original distributions"""
+    """Generate simulated data with improved preservation of relationships"""
     try:
         date_range = pd.date_range(start=start_date, end=end_date, freq='D')
         
-        # First, analyze date patterns in original data
-        if 'date' in existing_data.columns:
-            existing_data['date'] = pd.to_datetime(existing_data['date'])
-            existing_data.set_index('date', inplace=True)
+        # Detect the column structure of the original data
+        all_columns = existing_data.columns.tolist()
         
-        # Initialize empty lists for rows
-        all_rows = []
+        # Try to detect region column, date column, and numeric columns
+        region_column = None
+        date_column = None
+        numeric_columns = []
         
-        # Generate data for each date
-        for date in date_range:
-            row_data = {'date': date}
-            
-            for column, config in columns_config.items():
-                # Analyze original distribution
+        # Check for date column
+        for col in all_columns:
+            if existing_data[col].dtype == 'datetime64[ns]' or 'date' in col.lower():
+                try:
+                    pd.to_datetime(existing_data[col])
+                    date_column = col
+                    break
+                except:
+                    pass
+        
+        # If we didn't find a date column but need one, assume the first column
+        if date_column is None and len(all_columns) > 0:
+            try:
+                pd.to_datetime(existing_data[all_columns[0]])
+                date_column = all_columns[0]
+            except:
+                pass
+        
+        # Try to identify region column (string column with location/region names)
+        string_columns = existing_data.select_dtypes(include=['object']).columns
+        for col in string_columns:
+            if any(word in col.lower() for word in ['region', 'län', 'county', 'state', 'location']):
+                region_column = col
+                break
+        
+        # If no obvious region column, use the first string column that's not the date
+        if region_column is None and len(string_columns) > 0:
+            for col in string_columns:
+                if col != date_column:
+                    region_column = col
+                    break
+        
+        # Identify numeric columns
+        for col in all_columns:
+            if col not in [date_column, region_column] and pd.api.types.is_numeric_dtype(existing_data[col]):
+                numeric_columns.append(col)
+        
+        # Now we analyze distributions for each column and the relationships between them
+        dist_patterns = {}
+        
+        # Calculate rows per day for our simulation
+        if date_column is not None:
+            existing_data[date_column] = pd.to_datetime(existing_data[date_column])
+            rows_per_day = existing_data.groupby(date_column).size()
+            rows_per_day_stats = {
+                'mean': rows_per_day.mean(),
+                'std': rows_per_day.std(),
+                'min': max(1, rows_per_day.min()),
+                'max': rows_per_day.max()
+            }
+        else:
+            # Default to 1 row per day if no date column
+            rows_per_day_stats = {'mean': 1, 'std': 0, 'min': 1, 'max': 1}
+        
+        # Analyze distributions for each column
+        for column in all_columns:
+            if column in columns_config:
                 original_data = existing_data[column].dropna()
-                if isinstance(original_data, pd.Series):
-                    original_data = original_data.copy()  # Make a copy to avoid view warnings
-                dist_pattern = analyze_distribution_pattern(original_data, date_column='date')
+                dist_patterns[column] = analyze_distribution_pattern(original_data, column)
+        
+        # If we have region and numeric columns, analyze their relationship
+        region_value_patterns = {}
+        if region_column is not None and numeric_columns:
+            for region in existing_data[region_column].unique():
+                region_data = existing_data[existing_data[region_column] == region]
+                region_value_patterns[region] = {}
                 
-                if dist_pattern is not None:
-                    # Generate values matching the distribution
-                    if dist_pattern['type'] == 'categorical' and dist_pattern.get('entries_per_day'):
-                        # For categorical with multiple entries per day
-                        entries_info = dist_pattern['entries_per_day']
-                        
-                        # FIX: Use Python's round() function and properly handle clipping for a float
-                        random_value = np.random.normal(entries_info['mean'], entries_info['std'])
-                        rounded_value = round(random_value)
-                        n_entries = int(max(entries_info['min'], min(rounded_value, entries_info['max'])))
-                        
-                        # Fix: Normalize probabilities to ensure they sum to 1
-                        probs = list(dist_pattern['distribution'].values())
-                        probs_sum = sum(probs)
-                        normalized_probs = [p/probs_sum for p in probs]
-                        
-                        values = np.random.choice(
-                            dist_pattern['unique_values'],
-                            size=n_entries,
-                            p=normalized_probs
-                        )
-                        
-                        # Create multiple rows for this date
-                        for value in values:
-                            all_rows.append({**row_data, column: value})
-                            
-                    else:
-                        # Single value per day
-                        if dist_pattern['type'] == 'numeric':
-                            value = generate_realistic_values(dist_pattern, 1)[0]
-                            
-                            # Add noise if enabled
-                            if config.get('noise_enabled', False):
-                                noise_level = config.get('noise_level', 0.1)
-                                noise = np.random.normal(0, dist_pattern['stats']['std'] * noise_level)
-                                value = np.clip(
-                                    value + noise,
-                                    dist_pattern['stats']['min'],
-                                    dist_pattern['stats']['max']
-                                )
+                for num_col in numeric_columns:
+                    if num_col in columns_config:
+                        column_data = region_data[num_col].dropna()
+                        if not column_data.empty:
+                            region_value_patterns[region][num_col] = analyze_distribution_pattern(column_data)
+        
+        # Generate data with progress feedback
+        all_rows = []
+        total_dates = len(date_range)
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
+        for i, date in enumerate(date_range):
+            # Sample number of rows for this date
+            if rows_per_day_stats['std'] > 0:
+                n_rows = int(np.random.normal(rows_per_day_stats['mean'], rows_per_day_stats['std']))
+                n_rows = max(rows_per_day_stats['min'], min(n_rows, rows_per_day_stats['max']))
+            else:
+                n_rows = int(rows_per_day_stats['mean'])
+            
+            # Generate rows
+            for _ in range(n_rows):
+                row_data = {}
+                
+                # Add date
+                if date_column is not None:
+                    row_data[date_column] = date
+                
+                # If we have a region column, first select a region
+                if region_column is not None and region_column in dist_patterns:
+                    region = generate_realistic_values(dist_patterns[region_column], 1)[0]
+                    row_data[region_column] = region
+                    
+                    # Now generate values based on the region's specific distribution
+                    if region in region_value_patterns:
+                        for column in numeric_columns:
+                            if column in columns_config:
+                                if column in region_value_patterns[region]:
+                                    region_pattern = region_value_patterns[region][column]
+                                    value = generate_realistic_values(region_pattern, 1)[0]
+                                else:
+                                    # Fallback to overall distribution if no region-specific pattern
+                                    pattern = dist_patterns.get(column)
+                                    value = generate_realistic_values(pattern, 1)[0]
                                 
-                                if dist_pattern['stats']['is_discrete']:
-                                    value = round(value)
+                                # Apply noise if configured
+                                config = columns_config.get(column, {})
+                                if config.get('noise_enabled', False) and 'stats' in dist_patterns.get(column, {}):
+                                    noise_level = config.get('noise_level', 0.1)
+                                    pattern = dist_patterns.get(column)
+                                    noise = np.random.normal(0, pattern['stats']['std'] * noise_level)
+                                    value = np.clip(value + noise, pattern['stats']['min'], pattern['stats']['max'])
                                 
-                                # Check if decimals are allowed
+                                # Round if needed
                                 if not config.get('allow_decimals', True):
                                     value = round(value)
-                        else:
-                            # Fix: Normalize probabilities to ensure they sum to 1
-                            probs = list(dist_pattern['distribution'].values())
-                            probs_sum = sum(probs)
-                            normalized_probs = [p/probs_sum for p in probs]
+                                
+                                row_data[column] = value
+                else:
+                    # Generate values for each configured column
+                    for column, config in columns_config.items():
+                        if column in dist_patterns:
+                            pattern = dist_patterns[column]
+                            value = generate_realistic_values(pattern, 1)[0]
                             
-                            value = np.random.choice(
-                                dist_pattern['unique_values'],
-                                p=normalized_probs
-                            )
-                        
-                        row_data[column] = value
-                        
-            if not any(dist_pattern.get('entries_per_day') for dist_pattern in 
-                      [analyze_distribution_pattern(existing_data[col].dropna(), 'date') 
-                       for col in columns_config if col in existing_data.columns]):
+                            # Apply noise if configured for numeric columns
+                            if config.get('type') == 'numeric' and config.get('noise_enabled', False):
+                                noise_level = config.get('noise_level', 0.1)
+                                if 'stats' in pattern:
+                                    noise = np.random.normal(0, pattern['stats']['std'] * noise_level)
+                                    value = np.clip(value + noise, pattern['stats']['min'], pattern['stats']['max'])
+                            
+                            # Round if needed
+                            if config.get('type') == 'numeric' and not config.get('allow_decimals', True):
+                                value = round(value)
+                            
+                            row_data[column] = value
+                
                 all_rows.append(row_data)
+            
+            # Update progress
+            progress = (i + 1) / total_dates
+            progress_bar.progress(progress)
+            status_text.text(f"Generating data: {i + 1}/{total_dates} dates completed")
         
-        # Convert to DataFrame
+        # Convert to DataFrame and ensure proper formatting
         simulated_data = pd.DataFrame(all_rows)
         
-        # Convert date column to datetime and format it
-        simulated_data['date'] = pd.to_datetime(simulated_data['date']).dt.strftime('%Y-%m-%d')
+        # Format dates properly
+        if date_column in simulated_data.columns:
+            simulated_data[date_column] = pd.to_datetime(simulated_data[date_column])
+            # Match format of original data
+            if date_column in existing_data.columns:
+                orig_date_sample = str(existing_data[date_column].iloc[0])
+                if ' 00:00:00' in orig_date_sample:
+                    simulated_data[date_column] = simulated_data[date_column].dt.strftime('%Y-%m-%d 00:00:00')
+                else:
+                    simulated_data[date_column] = simulated_data[date_column].dt.strftime('%Y-%m-%d')
         
-        # Sort by date
-        simulated_data = simulated_data.sort_values('date').reset_index(drop=True)
+        # Ensure column order matches original data
+        if set(all_columns).issubset(set(simulated_data.columns)):
+            simulated_data = simulated_data[all_columns]
+        
+        # Sort by date if available
+        if date_column in simulated_data.columns:
+            simulated_data = simulated_data.sort_values(date_column).reset_index(drop=True)
         
         return simulated_data
-        
+    
     except Exception as e:
         st.error(f"Error generating simulated data: {str(e)}")
+        import traceback
+        st.error(traceback.format_exc())
         return None
-
+    
 def plot_distribution_comparison(original_data, simulated_data, column):
     """Create detailed distribution comparison plots"""
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 5))
@@ -497,14 +596,17 @@ if uploaded_file:
                         # Download buttons
                         col1, col2 = st.columns(2)
                         with col1:
-                            csv = simulated_data.to_csv(index=False)
+                            # CSV with utf-8-sig encoding
+                            csv = simulated_data.to_csv(index=False, encoding='utf-8-sig')
                             st.download_button(
                                 label="Download as CSV",
                                 data=csv,
                                 file_name="simulated_data.csv",
                                 mime="text/csv"
                             )
+
                         with col2:
+                            # Excel with xlsxwriter
                             output = io.BytesIO()
                             with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
                                 simulated_data.to_excel(writer, index=False)
